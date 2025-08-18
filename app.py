@@ -3,9 +3,14 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import json
-import backtrader as bt
 from datetime import datetime, timedelta
 from utils import fetch_stock_data, calculate_score, run_backtest
+import time
+
+# Cache data fetching to improve performance
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def cached_fetch_stock_data(ticker):
+    return fetch_stock_data(ticker)
 
 st.title('Hybrid Stock Screener & Backtester')
 
@@ -56,39 +61,62 @@ if st.sidebar.button('Remove from Watchlist'):
 
 # Filter and score stocks
 st.header('Stock Screening Results')
-tickers_to_screen = watchlist if watchlist else all_tickers[:10]  # Limit for demo
+tickers_to_screen = watchlist if watchlist else all_tickers  # Use full ticker list
+batch_size = 50  # Process 50 tickers at a time
 results = []
-for ticker in tickers_to_screen:
-    try:
-        data = fetch_stock_data(ticker)
-        if data:
-            score = calculate_score(ticker, data, market_caps, sectors, momentum)
-            if score is not None:
-                results.append({'Ticker': ticker, 'Score': score})
-    except Exception as e:
-        st.warning(f'Error processing {ticker}: {e}')
 
-# Display results
+# Progress bar
+progress_bar = st.progress(0)
+total_tickers = len(tickers_to_screen)
+processed = 0
+
+# Process tickers in batches
+for i in range(0, total_tickers, batch_size):
+    batch = tickers_to_screen[i:i + batch_size]
+    for ticker in batch:
+        try:
+            data = cached_fetch_stock_data(ticker)
+            if data:
+                score = calculate_score(ticker, data, market_caps, sectors, momentum)
+                if score is not None:
+                    results.append({'Ticker': ticker, 'Score': score})
+            processed += 1
+            progress_bar.progress(min(processed / total_tickers, 1.0))
+            time.sleep(0.1)  # Small delay to avoid API rate limits
+        except Exception as e:
+            st.warning(f'Error processing {ticker}: {e}')
+            processed += 1
+            progress_bar.progress(min(processed / total_tickers, 1.0))
+
+# Display results with pagination
 if results:
     df = pd.DataFrame(results)
     df = df.sort_values(by='Score', ascending=False)
-    st.dataframe(df)
+    
+    # Pagination
+    st.subheader(f'Showing {len(df)} stocks')
+    page_size = 50
+    page_number = st.number_input('Page', min_value=1, max_value=(len(df) // page_size) + 1, value=1)
+    start_idx = (page_number - 1) * page_size
+    end_idx = start_idx + page_size
+    st.dataframe(df[start_idx:end_idx])
 
     # Plot selected stock
     selected_stock = st.selectbox('Select Stock for Chart', df['Ticker'])
     if selected_stock:
-        data = fetch_stock_data(selected_stock)
-        fig = go.Figure(data=[
-            go.Candlestick(
-                x=data['hist']['Date'],
-                open=data['hist']['Open'],
-                high=data['hist']['High'],
-                low=data['hist']['Low'],
-                close=data['hist']['Close']
-            )
-        ])
-        fig.update_layout(title=f'{selected_stock} Candlestick Chart', xaxis_title='Date', yaxis_title='Price')
-        st.plotly_chart(fig)
+        data = cached_fetch_stock_data(selected_stock)
+        if data:
+            fig = go.Figure(data=[
+                go.Candlestick(
+                    x=data['hist']['Date'],
+                    open=data['hist']['Open'],
+                    high=data['hist']['High'],
+                    low=data['hist']['Low'],
+                    close=data['hist']['Close']
+                )
+            ])
+            fig.update_layout(title=f'{selected_stock} Candlestick Chart', xaxis_title='Date', yaxis_title='Price')
+            st.plotly_chart(fig)
 
 # Backtesting Section
 st.header('Backtesting')
