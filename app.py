@@ -3,10 +3,10 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import json
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time as datetime_time  # Explicitly import time from datetime
 import pytz
 from utils import fetch_stock_data, calculate_score, run_backtest
-import time
+import time  # For time.sleep
 import os
 
 # Cache data fetching to improve performance
@@ -26,17 +26,24 @@ data_file = 'stock_data.json'
 def needs_refresh(last_fetch_str):
     if not last_fetch_str:
         return True
-    last_fetch = datetime.fromisoformat(last_fetch_str).astimezone(ist)
-    now = datetime.now(ist)
-    today_1am = datetime.combine(now.date(), time(1, 0)).astimezone(ist)
-    return last_fetch < today_1am
+    try:
+        last_fetch = datetime.fromisoformat(last_fetch_str).astimezone(ist)
+        now = datetime.now(ist)
+        today_1am = datetime.combine(now.date(), datetime_time(1, 0)).astimezone(ist)
+        return last_fetch < today_1am
+    except ValueError:
+        return True  # If parsing fails, refresh data
 
 # Load stored data if exists
 stored_data = {}
 if os.path.exists(data_file):
-    with open(data_file, 'r') as f:
-        stored_data = json.load(f)
-    last_fetch = stored_data.get('last_fetch', None)
+    try:
+        with open(data_file, 'r') as f:
+            stored_data = json.load(f)
+        last_fetch = stored_data.get('last_fetch', None)
+    except Exception as e:
+        st.error(f'Error loading stock_data.json: {e}')
+        last_fetch = None
 else:
     last_fetch = None
 
@@ -51,8 +58,12 @@ if st.sidebar.button('Refresh Data Now'):
     st.sidebar.success('Data refresh initiated.')
 
 # Load tickers
-with open('tickers.txt', 'r') as f:
-    all_tickers = [line.strip() for line in f if line.strip()]
+try:
+    with open('tickers.txt', 'r') as f:
+        all_tickers = [line.strip() for line in f if line.strip()]
+except FileNotFoundError:
+    st.error('tickers.txt not found.')
+    all_tickers = []
 
 # Load or initialize watchlist
 try:
@@ -60,6 +71,8 @@ try:
         watchlist = json.load(f)
 except FileNotFoundError:
     watchlist = []
+    with open('watchlist.json', 'w') as f:
+        json.dump(watchlist, f)
 
 # Sidebar: Filters
 st.sidebar.header('Filters')
@@ -139,6 +152,8 @@ for i in range(0, total_tickers, batch_size):
             time.sleep(0.1)  # Small delay to avoid API rate limits
         except Exception as e:
             st.warning(f'Error processing {ticker}: {e}')
+            with open('errors.log', 'a') as f:
+                f.write(f'{datetime.now(ist)}: Error processing {ticker}: {str(e)}\n')
             processed += 1
             progress_percentage = min(processed / total_tickers, 1.0)
             progress_bar.progress(progress_percentage)
@@ -147,8 +162,11 @@ for i in range(0, total_tickers, batch_size):
 # Save updated data if fetched fresh
 if fetch_fresh:
     stored_data['last_fetch'] = datetime.now(ist).isoformat()
-    with open(data_file, 'w') as f:
-        json.dump(stored_data, f, default=str)  # Handle datetime serialization
+    try:
+        with open(data_file, 'w') as f:
+            json.dump(stored_data, f, default=str)  # Handle datetime serialization
+    except Exception as e:
+        st.error(f'Error saving stock_data.json: {e}')
 
 # Display results with pagination
 if results:
@@ -249,13 +267,18 @@ for pos in portfolio['positions']:
             updated_positions.append(pos)
     except Exception as e:
         st.warning(f'Error updating {pos["ticker"]}: {e}')
+        with open('errors.log', 'a') as f:
+            f.write(f'{datetime.now(ist)}: Error updating {pos["ticker"]}: {str(e)}\n')
         updated_positions.append(pos)
 
 portfolio['positions'] = updated_positions
 
 # Save updated portfolio
-with open(paper_file, 'w') as f:
-    json.dump(portfolio, f)
+try:
+    with open(paper_file, 'w') as f:
+        json.dump(portfolio, f)
+except Exception as e:
+    st.error(f'Error saving paper_portfolio.json: {e}')
 
 # Display portfolio
 if portfolio['positions']:
@@ -307,6 +330,8 @@ if st.button('Buy in Paper Portfolio'):
                 st.error(f'{buy_stock} does not meet CAN SLIM buy criteria.')
     except Exception as e:
         st.error(f'Error buying {buy_stock}: {e}')
+        with open('errors.log', 'a') as f:
+            f.write(f'{datetime.now(ist)}: Error buying {buy_stock}: {str(e)}\n')
 
 # Sell position from paper portfolio
 st.subheader('Sell Position from Paper Portfolio')
@@ -335,6 +360,8 @@ if st.button('Sell in Paper Portfolio'):
                 break
             except Exception as e:
                 st.error(f'Error selling {sell_stock}: {e}')
+                with open('errors.log', 'a') as f:
+                    f.write(f'{datetime.now(ist)}: Error selling {sell_stock}: {str(e)}\n')
                 break
     else:
         st.error('Position not found.')
