@@ -1,0 +1,7 @@
+streamlit
+yfinance
+pandas
+plotly
+backtrader
+numpy
+ta-lib
