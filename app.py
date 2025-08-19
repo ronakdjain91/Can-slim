@@ -103,7 +103,7 @@ max_tickers = st.sidebar.number_input("Max Tickers to Screen", 50, 750, 100)
 
 # Load data
 data = load_stock_data()
-if not 
+if not data:
     st.warning("No stock data available. Click 'Refresh' to fetch data.")
     st.stop()
 
@@ -120,13 +120,15 @@ for ticker in tickers_to_use[:max_tickers]:
     cap = fund.get("market_cap")
     sec = fund.get("sector", "")
 
+    include = False
     if "Large (> $10B)" in market_caps and cap and cap > 10e9:
-        pass
-    elif "Mid ($2-10B)" in market_caps and cap and 2e9 < cap <= 10e9:
-        pass
-    elif "Small (< $2B)" in market_caps and cap and cap < 2e9:
-        pass
-    else:
+        include = True
+    if "Mid ($2-10B)" in market_caps and cap and 2e9 < cap <= 10e9:
+        include = True
+    if "Small (< $2B)" in market_caps and cap and cap < 2e9:
+        include = True
+
+    if not include:
         continue
 
     if sec not in sectors:
@@ -238,7 +240,7 @@ with col1:
             for p in positions:
                 if p['ticker'] == buy_ticker:
                     p['shares'] += buy_shares
-                    p['avg_price'] = ((p['avg_price'] * p['shares']) + cost) / (p['shares'])
+                    p['avg_price'] = ((p['avg_price'] * (p['shares'] - buy_shares)) + cost) / p['shares']
                     found = True
             if not found:
                 positions.append({
@@ -250,24 +252,31 @@ with col1:
             save_portfolio(portfolio)
             st.success(f"Bought {buy_shares} shares of {buy_ticker}")
             st.rerun()
+        else:
+            st.error("Insufficient cash or invalid price.")
 
 with col2:
-    sell_ticker = st.selectbox("Sell Ticker", [p['ticker'] for p in positions])
-    sell_pos = next((p for p in positions if p['ticker'] == sell_ticker), None)
-    max_shares = sell_pos['shares'] if sell_pos else 0
-    sell_shares = st.number_input("Sell Shares", 1, max_shares, 1)
-    if st.button("Sell"):
-        price = data.get(sell_ticker, {}).get('fundamentals', {}).get('price')
-        if price and sell_pos and sell_shares <= sell_pos['shares']:
-            revenue = price * sell_shares
-            portfolio['cash'] += revenue
-            sell_pos['shares'] -= sell_shares
-            if sell_pos['shares'] == 0:
-                positions.remove(sell_pos)
-            portfolio['positions'] = positions
-            save_portfolio(portfolio)
-            st.success(f"Sold {sell_shares} shares of {sell_ticker}")
-            st.rerun()
+    if positions:
+        sell_ticker = st.selectbox("Sell Ticker", [p['ticker'] for p in positions])
+        sell_pos = next((p for p in positions if p['ticker'] == sell_ticker), None)
+        max_shares = sell_pos['shares'] if sell_pos else 0
+        sell_shares = st.number_input("Sell Shares", 1, max_shares, 1)
+        if st.button("Sell"):
+            price = data.get(sell_ticker, {}).get('fundamentals', {}).get('price')
+            if price and sell_pos and sell_shares <= sell_pos['shares']:
+                revenue = price * sell_shares
+                portfolio['cash'] += revenue
+                sell_pos['shares'] -= sell_shares
+                if sell_pos['shares'] == 0:
+                    positions.remove(sell_pos)
+                portfolio['positions'] = positions
+                save_portfolio(portfolio)
+                st.success(f"Sold {sell_shares} shares of {sell_ticker}")
+                st.rerun()
+            else:
+                st.error("Invalid sell operation.")
+    else:
+        st.write("No positions to sell.")
 
 # Portfolio Table
 if positions:
