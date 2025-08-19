@@ -1,277 +1,289 @@
+# app.py
 import streamlit as st
 import pandas as pd
-import yfinance as yf
 import plotly.graph_objects as go
+from datetime import datetime, timezone
 import json
-from datetime import datetime, timedelta, time as datetime_time
-import pytz
-from utils import fetch_stock_data, calculate_score, run_backtest
-import time
 import os
+from utils import (
+    fetch_stock_data, calculate_score, run_backtest,
+    load_tickers, log_error, ensure_data_file
+)
+import time
 
-# Cache data fetching to improve performance
-@st.cache_data(ttl=3600)  # Cache for 1 hour
-def cached_fetch_stock_data(ticker, _cache_buster=0):  # Add cache_buster to force refresh
-    return fetch_stock_data(ticker)
+IST = timezone.utc  # Adjust manually in display
 
-st.title('Hybrid Stock Screener & Backtester')
+st.set_page_config(layout="wide", page_title="CAN SLIM Screener")
 
-# Timezone for IST
-ist = pytz.timezone('Asia/Kolkata')
+# Initialize files
+ensure_data_file()
 
-# Data storage file
-data_file = 'stock_data.json'
+DATA_FILE = 'stock_data.json'
+WATCHLIST_FILE = 'watchlist.json'
+PORTFOLIO_FILE = 'paper_portfolio.json'
 
-# Function to check if data needs refresh (every day at 1 AM IST)
-def needs_refresh(last_fetch_str):
-    if not last_fetch_str:
-        return True
+# Load data
+@st.cache_data(show_spinner=False)
+def load_stock_data():
+    if not os.path.exists(DATA_FILE):
+        return {}
     try:
-        last_fetch = datetime.fromisoformat(last_fetch_str).astimezone(ist)
-        now = datetime.now(ist)
-        today_1am = datetime.combine(now.date(), datetime_time(1, 0)).astimezone(ist)
-        return last_fetch < today_1am
-    except ValueError:
-        return True  # If parsing fails, refresh data
-
-# Load stored data if exists
-stored_data = {}
-if os.path.exists(data_file):
-    try:
-        with open(data_file, 'r') as f:
-            stored_data = json.load(f)
-        last_fetch = stored_data.get('last_fetch', None)
+        with open(DATA_FILE, 'r') as f:
+            data = json.load(f)
+        return data.get('stocks', {})
     except Exception as e:
-        st.error(f'Error loading stock_data.json: {e}')
-        with open('errors.log', 'a') as f:
-            f.write(f'{datetime.now(ist)}: Error loading stock_data.json: {str(e)}\n')
-        last_fetch = None
-else:
-    last_fetch = None
+        log_error("N/A", f"Failed to load stock_data.json: {e}")
+        return {}
 
-# Auto-refresh if needed
-if needs_refresh(last_fetch):
-    st.info('Fetching fresh data as it is stale or first run...')
-    # Proceed to fetch (will happen in screening loop)
+def load_watchlist():
+    try:
+        with open(WATCHLIST_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return []
 
-# Manual refresh button with cache clearing
-cache_buster = int(time.time())  # Unique value to bust cache
-if st.sidebar.button('Refresh Data Now'):
-    last_fetch = None  # Force refresh
-    st.cache_data.clear()  # Clear Streamlit cache
-    stored_data = {'last_fetch': None, 'stocks': {}}  # Reset stored data
-    st.sidebar.success('Data refresh initiated. Cache cleared.')
-
-# Load tickers
-try:
-    with open('tickers.txt', 'r') as f:
-        all_tickers = [line.strip() for line in f if line.strip()]
-except FileNotFoundError:
-    st.error('tickers.txt not found.')
-    all_tickers = []
-
-# Load or initialize watchlist
-try:
-    with open('watchlist.json', 'r') as f:
-        watchlist = json.load(f)
-except FileNotFoundError:
-    watchlist = []
-    with open('watchlist.json', 'w') as f:
+def save_watchlist(watchlist):
+    with open(WATCHLIST_FILE, 'w') as f:
         json.dump(watchlist, f)
 
-# Sidebar: Filters
-st.sidebar.header('Filters')
+def load_portfolio():
+    try:
+        with open(PORTFOLIO_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {"cash": 100000.0, "positions": []}
+
+def save_portfolio(portfolio):
+    with open(PORTFOLIO_FILE, 'w') as f:
+        json.dump(portfolio, f, indent=2)
+
+# Sidebar
+st.sidebar.title("CAN SLIM Screener")
+
+# Manual Refresh
+if st.sidebar.button("🔄 Refresh All Data"):
+    st.cache_data.clear()
+    with st.spinner("Fetching latest data..."):
+        fetch_stock_data()
+    st.success("Data refreshed!")
+    st.cache_data.clear()
+
+# Watchlist Management
+st.sidebar.subheader("Watchlist")
+watchlist = load_watchlist()
+add_ticker = st.sidebar.text_input("Add Ticker (e.g., AAPL)")
+if st.sidebar.button("Add to Watchlist") and add_ticker:
+    if add_ticker not in watchlist:
+        watchlist.append(add_ticker)
+        save_watchlist(watchlist)
+        st.rerun()
+
+for ticker in watchlist:
+    if st.sidebar.button(f"❌ {ticker}"):
+        watchlist.remove(ticker)
+        save_watchlist(watchlist)
+        st.rerun()
+
+# Filters
+st.sidebar.subheader("Filters")
 market_caps = st.sidebar.multiselect(
-    'Market Cap', ['Large (> $10B)', 'Mid ($2-10B)', 'Small (< $2B)'],
-    default=['Large (> $10B)']
+    "Market Cap",
+    ["Large (> $10B)", "Mid ($2-10B)", "Small (< $2B)"],
+    default=["Large (> $10B)", "Mid ($2-10B)"]
 )
 sectors = st.sidebar.multiselect(
-    'Sectors', ['Technology', 'Healthcare', 'Finance', 'Consumer', 'Energy'],
-    default=['Technology']
+    "Sectors",
+    ["Technology", "Healthcare", "Finance", "Consumer", "Energy"],
+    default=["Technology"]
 )
-momentum = st.sidebar.selectbox('Momentum', ['Positive', 'Negative', 'All'], index=0)
+momentum = st.sidebar.selectbox("Momentum", ["Positive", "Negative", "All"])
 
-# Watchlist management
-st.sidebar.header('Watchlist Management')
-new_stock = st.sidebar.text_input('Add Stock Ticker (e.g., AAPL)')
-if st.sidebar.button('Add to Watchlist'):
-    if new_stock.upper() in all_tickers and new_stock.upper() not in watchlist:
-        watchlist.append(new_stock.upper())
-        with open('watchlist.json', 'w') as f:
-            json.dump(watchlist, f)
-        st.sidebar.success(f'Added {new_stock.upper()} to watchlist')
-    elif new_stock.upper() not in all_tickers:
-        st.sidebar.error('Invalid ticker')
+# Max tickers for performance
+max_tickers = st.sidebar.number_input("Max Tickers to Screen", 50, 750, 100)
+
+# Load data
+data = load_stock_data()
+if not 
+    st.warning("No stock data available. Click 'Refresh' to fetch data.")
+    st.stop()
+
+# Apply watchlist filter
+use_watchlist = st.sidebar.checkbox("Use Watchlist Only", value=False)
+tickers_to_use = watchlist if use_watchlist else list(data.keys())
+tickers_to_use = [t for t in tickers_to_use if t in data]
+
+# Filter by market cap and sector
+filtered_tickers = []
+for ticker in tickers_to_use[:max_tickers]:
+    d = data[ticker]
+    fund = d['fundamentals']
+    cap = fund.get("market_cap")
+    sec = fund.get("sector", "")
+
+    if "Large (> $10B)" in market_caps and cap and cap > 10e9:
+        pass
+    elif "Mid ($2-10B)" in market_caps and cap and 2e9 < cap <= 10e9:
+        pass
+    elif "Small (< $2B)" in market_caps and cap and cap < 2e9:
+        pass
     else:
-        st.sidebar.warning('Stock already in watchlist')
+        continue
 
-remove_stock = st.sidebar.selectbox('Remove from Watchlist', [''] + watchlist)
-if st.sidebar.button('Remove from Watchlist'):
-    if remove_stock:
-        watchlist.remove(remove_stock)
-        with open('watchlist.json', 'w') as f:
-            json.dump(watchlist, f)
-        st.sidebar.success(f'Removed {remove_stock} from watchlist')
+    if sec not in sectors:
+        continue
 
-# Filter and score stocks
-st.header('Stock Screening Results')
-tickers_to_screen = watchlist if watchlist else all_tickers  # Use full ticker list
-batch_size = 50  # Process 50 tickers at a time
+    filtered_tickers.append(ticker)
+
+# Scoring with progress bar
+st.subheader("Screening Results")
+if not filtered_tickers:
+    st.warning("No tickers match filters.")
+    st.stop()
+
+progress_bar = st.progress(0)
+status_text = st.empty()
 results = []
 
-# Progress bar and percentage
-progress_bar = st.progress(0)
-progress_text = st.empty()  # Placeholder for progress percentage
-total_tickers = len(tickers_to_screen)
-processed = 0
-
-# Flag to determine if we need to fetch fresh data
-fetch_fresh = needs_refresh(last_fetch) or last_fetch is None
-
-# Process tickers in batches
-for i in range(0, total_tickers, batch_size):
-    batch = tickers_to_screen[i:i + batch_size]
-    for ticker in batch:
-        try:
-            if fetch_fresh or ticker not in stored_data.get('stocks', {}):
-                data = cached_fetch_stock_data(ticker, cache_buster)
-                if data:
-                    stored_data.setdefault('stocks', {})[ticker] = data
-            else:
-                data = stored_data['stocks'][ticker]
-            
-            if data and isinstance(data['hist'], list) and data['hist']:
-                try:
-                    hist = pd.DataFrame(data['hist'])
-                    required_cols = ['Date', 'Open', 'High', 'Low', 'Close']
-                    if not hist.empty and all(col in hist for col in required_cols):
-                        score = calculate_score(ticker, data, market_caps, sectors, momentum)
-                        if score is not None:
-                            results.append({
-                                'Ticker': ticker,
-                                'Total Score': score['total'],
-                                'Fundamental Score': score['fundamental'],
-                                'Technical Score': score['technical']
-                            })
-                    else:
-                        raise ValueError(f"Missing required columns for {ticker}")
-                except Exception as e:
-                    raise ValueError(f"Invalid hist data format for {ticker}: {str(e)}")
-            else:
-                raise ValueError(f"No valid historical data for {ticker}")
-            processed += 1
-            progress_percentage = min(processed / total_tickers, 1.0)
-            progress_bar.progress(progress_percentage)
-            progress_text.text(f'Processing: {progress_percentage * 100:.1f}%')
-            time.sleep(0.1)  # Small delay to avoid API rate limits
-        except Exception as e:
-            st.warning(f'Error processing {ticker}: {e}')
-            with open('errors.log', 'a') as f:
-                f.write(f'{datetime.now(ist)}: Error processing {ticker}: {str(e)}\n')
-            processed += 1
-            progress_percentage = min(processed / total_tickers, 1.0)
-            progress_bar.progress(progress_percentage)
-            progress_text.text(f'Processing: {progress_percentage * 100:.1f}%')
-
-# Save updated data if fetched fresh
-if fetch_fresh:
-    stored_data['last_fetch'] = datetime.now(ist).isoformat()
+for idx, ticker in enumerate(filtered_tickers):
     try:
-        with open(data_file, 'w') as f:
-            json.dump(stored_data, f, default=str)
+        d = data[ticker]
+        total, f, t = calculate_score(d)
+        momentum_ok = True
+        if momentum == "Positive" and t < 40:
+            continue
+        elif momentum == "Negative" and t >= 40:
+            continue
+
+        results.append({
+            "Ticker": f"[{ticker}](https://www.tradingview.com/symbols/{ticker.replace('.NS', '')}/)",
+            "Total Score": total,
+            "Fundamental Score": f,
+            "Technical Score": t,
+            "EPS Growth": f"{d['fundamentals'].get('eps_growth', 0):.1%}" if d['fundamentals'].get('eps_growth') else "N/A",
+            "ROE": f"{d['fundamentals'].get('roe', 0):.1%}" if d['fundamentals'].get('roe') else "N/A",
+            "Price": f"${d['fundamentals'].get('price', 0):.2f}",
+            "Sector": d['fundamentals'].get('sector', 'Unknown')
+        })
     except Exception as e:
-        st.error(f'Error saving stock_data.json: {e}')
-        with open('errors.log', 'a') as f:
-            f.write(f'{datetime.now(ist)}: Error saving stock_data.json: {str(e)}\n')
+        log_error(ticker, f"Scoring failed: {e}")
+    progress_bar.progress((idx + 1) / len(filtered_tickers))
+    status_text.text(f"Processing: {100*(idx+1)/len(filtered_tickers):.1f}%")
 
-# Display results with pagination
-if results:
-    df = pd.DataFrame(results)
-    df = df.sort_values(by='Total Score', ascending=False)
-    
-    # Make Ticker clickable to TradingView
-    def make_clickable(ticker):
-        return f'<a href="https://www.tradingview.com/chart/?symbol={ticker}" target="_blank">{ticker}</a>'
-    
-    df_styled = df.style.format({'Ticker': make_clickable})
-    
-    # Pagination
-    st.subheader(f'Showing {len(df)} stocks')
-    page_size = 50
-    page_number = st.number_input('Page', min_value=1, max_value=(len(df) // page_size) + 1, value=1)
-    start_idx = (page_number - 1) * page_size
-    end_idx = start_idx + page_size
-    
-    # Display HTML table
-    st.markdown(df_styled.hide(axis='index')[start_idx:end_idx].to_html(escape=False), unsafe_allow_html=True)
+progress_bar.empty()
+status_text.empty()
 
-    # Plot selected stock
-    selected_stock = st.selectbox('Select Stock for Chart', df['Ticker'])
-    if selected_stock:
-        data = stored_data['stocks'].get(selected_stock) or cached_fetch_stock_data(selected_stock, cache_buster)
-        if data and isinstance(data['hist'], list) and data['hist']:
-            try:
-                hist = pd.DataFrame(data['hist'])
-                required_cols = ['Date', 'Open', 'High', 'Low', 'Close']
-                if not hist.empty and all(col in hist for col in required_cols):
-                    fig = go.Figure(data=[
-                        go.Candlestick(
-                            x=hist['Date'],
-                            open=hist['Open'],
-                            high=hist['High'],
-                            low=hist['Low'],
-                            close=hist['Close']
-                        )
-                    ])
-                    fig.update_layout(title=f'{selected_stock} Candlestick Chart', xaxis_title='Date', yaxis_title='Price')
-                    st.plotly_chart(fig)
-                else:
-                    st.error(f'Invalid or missing data for {selected_stock} chart.')
-                    with open('errors.log', 'a') as f:
-                        f.write(f'{datetime.now(ist)}: Invalid or missing data for {selected_stock} chart\n')
-            except Exception as e:
-                st.error(f'Error plotting chart for {selected_stock}: {e}')
-                with open('errors.log', 'a') as f:
-                    f.write(f'{datetime.now(ist)}: Error plotting chart for {selected_stock}: {str(e)}\n')
-        else:
-            st.error(f'No valid historical data for {selected_stock}.')
-            with open('errors.log', 'a') as f:
-                f.write(f'{datetime.now(ist)}: No valid historical data for {selected_stock}\n')
+# Paginate results
+results_df = pd.DataFrame(results)
+results_df = results_df.sort_values("Total Score", ascending=False)
 
-# Backtesting Section
-st.header('Backtesting')
-start_date = st.date_input('Start Date', datetime.now() - timedelta(days=365))
-end_date = st.date_input('End Date', datetime.now())
-selected_tickers = st.multiselect('Select Tickers for Backtest', df['Ticker'] if results else all_tickers)
+items_per_page = 50
+total_pages = (len(results_df) // items_per_page) + 1
+page = st.selectbox("Page", range(1, total_pages + 1)) - 1
+start = page * items_per_page
+end = start + items_per_page
 
-if st.button('Run Backtest'):
-    if selected_tickers:
-        metrics = run_backtest(selected_tickers, start_date, end_date)
-        st.write('Backtest Results:')
-        st.write(f"CAGR: {metrics['cagr']:.2%}")
-        st.write(f"Sharpe Ratio: {metrics['sharpe']:.2f}")
-        st.write(f"Max Drawdown: {metrics['max_drawdown']:.2%}")
-    else:
-        st.warning('Please select at least one ticker for backtesting.')
+st.markdown(
+    results_df.iloc[start:end].to_html(escape=False, index=False),
+    unsafe_allow_html=True
+)
 
-# Paper Trading Section
-st.header('Paper Portfolio')
+# Select stock for chart
+st.subheader("Candlestick Chart")
+selected_ticker = st.selectbox("Select Ticker", filtered_tickers)
+if selected_ticker:
+    stock_data = data[selected_ticker]
+    df = pd.DataFrame(stock_data['hist'])
+    df['Date'] = pd.to_datetime(df['Date'])
 
-# Load paper portfolio
-paper_file = 'paper_portfolio.json'
-try:
-    with open(paper_file, 'r') as f:
-        portfolio = json.load(f)
-except FileNotFoundError:
-    portfolio = {'cash': 100000.0, 'positions': []}
+    fig = go.Figure(data=[go.Candlestick(
+        x=df['Date'],
+        open=df['Open'],
+        high=df['High'],
+        low=df['Low'],
+        close=df['Close']
+    )])
+    fig.update_layout(title=f"{selected_ticker} - Candlestick Chart", xaxis_title="Date", yaxis_title="Price")
+    st.plotly_chart(fig, use_container_width=True)
 
-# Update portfolio: fetch current prices, check sell conditions
-updated_positions = []
-for pos in portfolio['positions']:
-    try:
-        # Fetch 1-day data to get latest price
-        current_data = yf.Ticker(pos['ticker']).history(period='1d')
-        if current_data.empty:
-            updated_positions.append(pos)
-            with open('errors.log', 'a') as f:
-                f.write(f'{datetime.now(ist)}: Empty
+    # Backtesting
+    if st.button("Run Backtest"):
+        with st.spinner("Running backtest..."):
+            metrics = run_backtest(selected_ticker, stock_data)
+            if metrics:
+                st.write(f"**CAGR:** {metrics['CAGR']}%")
+                st.write(f"**Sharpe Ratio:** {metrics['Sharpe Ratio']}")
+                st.write(f"**Max Drawdown:** {metrics['Max Drawdown']}%")
+            else:
+                st.error("Backtest failed.")
+
+# Paper Trading
+st.subheader("Paper Trading Portfolio")
+portfolio = load_portfolio()
+cash = portfolio['cash']
+positions = portfolio['positions']
+
+st.write(f"**Cash:** ${cash:,.2f}")
+
+# Manual buy/sell
+col1, col2 = st.columns(2)
+with col1:
+    buy_ticker = st.text_input("Buy Ticker")
+    buy_shares = st.number_input("Shares", 1, 1000, 1)
+    if st.button("Buy"):
+        price = data.get(buy_ticker, {}).get('fundamentals', {}).get('price')
+        if price and price * buy_shares <= cash:
+            cost = price * buy_shares
+            portfolio['cash'] -= cost
+            found = False
+            for p in positions:
+                if p['ticker'] == buy_ticker:
+                    p['shares'] += buy_shares
+                    p['avg_price'] = ((p['avg_price'] * p['shares']) + cost) / (p['shares'])
+                    found = True
+            if not found:
+                positions.append({
+                    "ticker": buy_ticker,
+                    "shares": buy_shares,
+                    "avg_price": price
+                })
+            portfolio['positions'] = positions
+            save_portfolio(portfolio)
+            st.success(f"Bought {buy_shares} shares of {buy_ticker}")
+            st.rerun()
+
+with col2:
+    sell_ticker = st.selectbox("Sell Ticker", [p['ticker'] for p in positions])
+    sell_pos = next((p for p in positions if p['ticker'] == sell_ticker), None)
+    max_shares = sell_pos['shares'] if sell_pos else 0
+    sell_shares = st.number_input("Sell Shares", 1, max_shares, 1)
+    if st.button("Sell"):
+        price = data.get(sell_ticker, {}).get('fundamentals', {}).get('price')
+        if price and sell_pos and sell_shares <= sell_pos['shares']:
+            revenue = price * sell_shares
+            portfolio['cash'] += revenue
+            sell_pos['shares'] -= sell_shares
+            if sell_pos['shares'] == 0:
+                positions.remove(sell_pos)
+            portfolio['positions'] = positions
+            save_portfolio(portfolio)
+            st.success(f"Sold {sell_shares} shares of {sell_ticker}")
+            st.rerun()
+
+# Portfolio Table
+if positions:
+    pos_data = []
+    for p in positions:
+        d = data.get(p['ticker'], {})
+        curr_price = d.get('fundamentals', {}).get('price', p['avg_price'])
+        pl = (curr_price - p['avg_price']) * p['shares']
+        pos_data.append({
+            "Ticker": p['ticker'],
+            "Shares": p['shares'],
+            "Avg Price": f"${p['avg_price']:.2f}",
+            "Current Price": f"${curr_price:.2f}",
+            "P&L": f"${pl:.2f}"
+        })
+    st.write("### Positions")
+    st.table(pos_data)
+    total_value = sum((data.get(p['ticker'], {}).get('fundamentals', {}).get('price', p['avg_price']) * p['shares'] for p in positions), cash)
+    st.write(f"**Total Portfolio Value:** ${total_value:,.2f}")
