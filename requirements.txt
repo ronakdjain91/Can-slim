@@ -1,9 +1,8 @@
-streamlit
-yfinance
-pandas
-plotly
-backtrader
-numpy
-ta-lib
-pandas-ta
-setuptools
+setuptools>=65.0.0
+pandas-ta>=0.3.14b
+streamlit==1.38.0
+yfinance==0.2.44
+pandas==2.2.3
+plotly==5.24.1
+backtrader==1.9.76.123
+numpy==2.1.1
