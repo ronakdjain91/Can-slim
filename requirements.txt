@@ -6,3 +6,4 @@ backtrader
 numpy
 ta-lib
 pandas-ta
+setuptools
